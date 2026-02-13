@@ -1,3 +1,171 @@
+type TxnRow = {
+  id: string;
+  txn_date: string;      // "YYYY-MM-DD"
+  description: string;
+  amount: number;
+  account_id: string;
+  category_id: string | null;
+};
+
+type CategoryRow = { id: string; name: string; type: "income" | "expense" };
+
+function normalizeAmount(input: string, catType?: "income" | "expense") {
+  const n = Number(input || 0);
+  const abs = Math.abs(n);
+
+  if (!catType) return n;                 // if Uncategorized (or not found), keep what user typed
+  return catType === "expense" ? -abs : abs;  // force sign automatically
+}
+const [editing, setEditing] = useState<TxnRow | null>(null);
+const [editAmount, setEditAmount] = useState("");
+const [editDesc, setEditDesc] = useState("");
+const [editDate, setEditDate] = useState("");
+const [editAccountId, setEditAccountId] = useState("");
+const [editCategoryId, setEditCategoryId] = useState<string | "">( "" );
+const [saving, setSaving] = useState(false);
+function startEdit(t: TxnRow) {
+  setEditing(t);
+  setEditDate(t.txn_date);
+  setEditDesc(t.description);
+  setEditAmount(String(Math.abs(t.amount))); // user always types positive
+  setEditAccountId(t.account_id);
+  setEditCategoryId(t.category_id ?? "");
+}
+<td className="text-right space-x-3">
+  <button
+    className="text-blue-600"
+    onClick={() => startEdit(t)}
+  >
+    Edit
+  </button>
+
+  <button
+    className="text-red-600"
+    onClick={() => onDelete(t.id)}
+  >
+    Delete
+  </button>
+</td>
+<td className="text-right space-x-3">
+  <button
+    className="text-blue-600"
+    onClick={() => startEdit(t)}
+  >
+    Edit
+  </button>
+
+  <button
+    className="text-red-600"
+    onClick={() => onDelete(t.id)}
+  >
+    Delete
+  </button>
+</td>
+{editing ? (
+  <div className="border rounded-lg p-4 mb-4">
+    <div className="font-semibold mb-3">Edit transaction</div>
+
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      <input
+        type="date"
+        value={editDate}
+        onChange={(e) => setEditDate(e.target.value)}
+        className="border rounded px-3 py-2"
+      />
+
+      <input
+        value={editDesc}
+        onChange={(e) => setEditDesc(e.target.value)}
+        className="border rounded px-3 py-2"
+        placeholder="Description"
+      />
+
+      <input
+        value={editAmount}
+        onChange={(e) => setEditAmount(e.target.value)}
+        className="border rounded px-3 py-2"
+        placeholder="Amount (type positive)"
+      />
+
+      <select
+        value={editAccountId}
+        onChange={(e) => setEditAccountId(e.target.value)}
+        className="border rounded px-3 py-2"
+      >
+        {/* render accounts options here */}
+        {accounts.map((a: any) => (
+          <option key={a.id} value={a.id}>{a.name}</option>
+        ))}
+      </select>
+
+      <select
+        value={editCategoryId}
+        onChange={(e) => setEditCategoryId(e.target.value)}
+        className="border rounded px-3 py-2 md:col-span-2"
+      >
+        <option value="">Uncategorized</option>
+        {categories.map((c: CategoryRow) => (
+          <option key={c.id} value={c.id}>
+            {c.name} ({c.type})
+          </option>
+        ))}
+      </select>
+
+      <div className="md:col-span-2 flex gap-2 justify-end">
+        <button
+          className="px-4 py-2 rounded border"
+          onClick={() => setEditing(null)}
+          disabled={saving}
+        >
+          Cancel
+        </button>
+
+        <button
+          className="px-4 py-2 rounded bg-black text-white"
+          disabled={saving}
+          onClick={async () => {
+            try {
+              setSaving(true);
+
+              const cat = categories.find((c: CategoryRow) => c.id === editCategoryId);
+              const finalAmount = normalizeAmount(editAmount, cat?.type);
+
+              const { error } = await supabase
+                .from("transactions")
+                .update({
+                  txn_date: editDate,
+                  description: editDesc,
+                  amount: finalAmount,
+                  account_id: editAccountId,
+                  category_id: editCategoryId || null,
+                })
+                .eq("id", editing.id);
+
+              if (error) throw error;
+
+              // refresh list (use whatever you already do to reload)
+              await refreshTransactions();
+
+              setEditing(null);
+            } catch (e: any) {
+              console.error(e);
+              alert(e?.message ?? "Failed to update transaction");
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          {saving ? "Saving..." : "Save"}
+        </button>
+      </div>
+    </div>
+
+    <div className="text-xs text-zinc-500 mt-2">
+      Category controls sign automatically: Income = positive, Expense = negative.
+    </div>
+  </div>
+) : null}
+
 "use client";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
