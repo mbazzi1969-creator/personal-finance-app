@@ -1,482 +1,344 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useActiveOrgId } from "@/lib/useActiveOrg";
-import { Card } from "@/components/ui";
+import { Button, Card, Input, Label, Select } from "@/components/ui";
 
-type AccountType =
-  | "bank"
-  | "cash"
-  | "credit_card"
-  | "loan"
-  | "investment"
-  | "other";
-
-type AccountRow = {
+type Account = { id: string; name: string };
+type Category = { id: string; name: string; type: "income" | "expense" };
+type Txn = {
   id: string;
-  org_id: string;
-  name: string;
-  type: AccountType;
-  currency: string;
-  opening_balance: number;
+  txn_date: string; // YYYY-MM-DD
+  description: string;
+  amount: number;
+  account_id: string;
+  category_id: string | null;
 };
 
-type CategoryType = "income" | "expense";
+function normalizeAmount(input: string, catType?: "income" | "expense") {
+  const n = Number(input || 0);
+  const abs = Math.abs(n);
+  if (!catType) return n; // Uncategorized -> keep what user typed
+  return catType === "expense" ? -abs : abs;
+}
 
-type CategoryRow = {
-  id: string;
-  org_id: string;
-  name: string;
-  type: CategoryType;
-};
-
-export default function SettingsPage() {
+export default function TransactionsPage() {
   const orgId = useActiveOrgId();
 
-  const [accounts, setAccounts] = useState<AccountRow[]>([]);
-  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [txns, setTxns] = useState<Txn[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // ---------- ADD FORMS ----------
-  const [accName, setAccName] = useState("");
-  const [accType, setAccType] = useState<AccountType>("bank");
-  const [accCurrency, setAccCurrency] = useState("USD");
-  const [accOpening, setAccOpening] = useState("0");
+  // Add form
+  const [form, setForm] = useState({
+    txn_date: new Date().toISOString().slice(0, 10),
+    description: "",
+    amount: "",
+    account_id: "",
+    category_id: "",
+  });
 
-  const [catName, setCatName] = useState("");
-  const [catType, setCatType] = useState<CategoryType>("expense");
+  // Edit state
+  const [editing, setEditing] = useState<Txn | null>(null);
+  const [editDate, setEditDate] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [editAmount, setEditAmount] = useState("");
+  const [editAccountId, setEditAccountId] = useState("");
+  const [editCategoryId, setEditCategoryId] = useState<string>(""); // "" = Uncategorized
+  const [saving, setSaving] = useState(false);
 
-  // ---------- EDIT STATE ----------
-  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
-  const [editAccName, setEditAccName] = useState("");
-  const [editAccType, setEditAccType] = useState<AccountType>("bank");
-  const [editAccCurrency, setEditAccCurrency] = useState("USD");
-  const [editAccOpening, setEditAccOpening] = useState("0");
-
-  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
-  const [editCatName, setEditCatName] = useState("");
-  const [editCatType, setEditCatType] = useState<CategoryType>("expense");
-
-  const editingAccount = useMemo(
-    () => accounts.find((a) => a.id === editingAccountId) ?? null,
-    [accounts, editingAccountId]
-  );
-
-  const editingCategory = useMemo(
-    () => categories.find((c) => c.id === editingCategoryId) ?? null,
-    [categories, editingCategoryId]
-  );
-
-  // ---------- LOAD ----------
-  async function loadAll() {
+  async function load() {
     if (!orgId) return;
     setLoading(true);
 
-    const [a, c] = await Promise.all([
-      supabase
-        .from("accounts")
-        .select("id,org_id,name,type,currency,opening_balance")
-        .eq("org_id", orgId)
-        .order("name"),
+    const [a, c, t] = await Promise.all([
+      supabase.from("accounts").select("id,name").eq("org_id", orgId).order("name"),
       supabase
         .from("categories")
-        .select("id,org_id,name,type")
+        .select("id,name,type")
         .eq("org_id", orgId)
         .order("type")
         .order("name"),
+      supabase
+        .from("transactions")
+        .select("id,txn_date,description,amount,account_id,category_id")
+        .eq("org_id", orgId)
+        .order("txn_date", { ascending: false })
+        .limit(200),
     ]);
 
-    if (a.error) console.error(a.error);
-    if (c.error) console.error(c.error);
+    if (!a.error) setAccounts(a.data as any);
+    else console.error(a.error);
 
-    setAccounts((a.data ?? []) as any);
-    setCategories((c.data ?? []) as any);
+    if (!c.error) setCategories(c.data as any);
+    else console.error(c.error);
+
+    if (!t.error) setTxns(t.data as any);
+    else console.error(t.error);
+
     setLoading(false);
   }
 
   useEffect(() => {
-    loadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    load();
   }, [orgId]);
 
-  // ---------- ACCOUNTS: ADD / DELETE / EDIT ----------
-  async function addAccount() {
+  function startEdit(t: Txn) {
+    setEditing(t);
+    setEditDate(t.txn_date);
+    setEditDesc(t.description);
+    setEditAmount(String(Math.abs(t.amount))); // user types positive
+    setEditAccountId(t.account_id);
+    setEditCategoryId(t.category_id ?? "");
+  }
+
+  async function addTxn(e: FormEvent) {
+    e.preventDefault();
     if (!orgId) return;
 
-    const opening = Number(accOpening || 0);
+    const cat = categories.find((c) => c.id === form.category_id);
+    const finalAmount = normalizeAmount(form.amount, cat?.type);
 
-    const { error } = await supabase.from("accounts").insert({
+    const { error } = await supabase.from("transactions").insert({
       org_id: orgId,
-      name: accName.trim(),
-      type: accType,
-      currency: accCurrency.trim() || "USD",
-      opening_balance: opening,
+      txn_date: form.txn_date,
+      description: form.description,
+      amount: finalAmount,
+      account_id: form.account_id,
+      category_id: form.category_id || null,
     });
 
     if (error) return alert(error.message);
 
-    setAccName("");
-    setAccOpening("0");
-    await loadAll();
+    setForm({ ...form, description: "", amount: "" });
+    await load();
   }
 
-  async function deleteAccount(id: string) {
-    if (!confirm("Delete this account?")) return;
+  async function saveEdit() {
+    if (!editing) return;
 
-    const { error } = await supabase.from("accounts").delete().eq("id", id);
-    if (error) return alert(error.message);
+    try {
+      setSaving(true);
 
-    // if you were editing this one, close edit mode
-    if (editingAccountId === id) setEditingAccountId(null);
+      const cat = categories.find((c) => c.id === editCategoryId);
+      const finalAmount = normalizeAmount(editAmount, cat?.type);
 
-    await loadAll();
+      const { error } = await supabase
+        .from("transactions")
+        .update({
+          txn_date: editDate,
+          description: editDesc,
+          amount: finalAmount,
+          account_id: editAccountId,
+          category_id: editCategoryId || null,
+        })
+        .eq("id", editing.id);
+
+      if (error) throw error;
+
+      setEditing(null);
+      await load();
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message ?? "Failed to update transaction");
+    } finally {
+      setSaving(false);
+    }
   }
 
-  function startEditAccount(a: AccountRow) {
-    setEditingAccountId(a.id);
-    setEditAccName(a.name);
-    setEditAccType(a.type);
-    setEditAccCurrency(a.currency || "USD");
-    setEditAccOpening(String(a.opening_balance ?? 0));
-  }
-
-  async function saveAccountEdit() {
-    if (!editingAccountId) return;
-
-    const opening = Number(editAccOpening || 0);
-
-    const { error } = await supabase
-      .from("accounts")
-      .update({
-        name: editAccName.trim(),
-        type: editAccType,
-        currency: editAccCurrency.trim() || "USD",
-        opening_balance: opening,
-      })
-      .eq("id", editingAccountId);
-
-    if (error) return alert(error.message);
-
-    setEditingAccountId(null);
-    await loadAll();
-  }
-
-  // ---------- CATEGORIES: ADD / DELETE / EDIT ----------
-  async function addCategory() {
-    if (!orgId) return;
-
-    const { error } = await supabase.from("categories").insert({
-      org_id: orgId,
-      name: catName.trim(),
-      type: catType,
-    });
-
-    if (error) return alert(error.message);
-
-    setCatName("");
-    await loadAll();
-  }
-
-  async function deleteCategory(id: string) {
-    if (!confirm("Delete this category?")) return;
-
-    const { error } = await supabase.from("categories").delete().eq("id", id);
-    if (error) return alert(error.message);
-
-    if (editingCategoryId === id) setEditingCategoryId(null);
-
-    await loadAll();
-  }
-
-  function startEditCategory(c: CategoryRow) {
-    setEditingCategoryId(c.id);
-    setEditCatName(c.name);
-    setEditCatType(c.type);
-  }
-
-  async function saveCategoryEdit() {
-    if (!editingCategoryId) return;
-
-    const { error } = await supabase
-      .from("categories")
-      .update({
-        name: editCatName.trim(),
-        type: editCatType,
-      })
-      .eq("id", editingCategoryId);
-
-    if (error) return alert(error.message);
-
-    setEditingCategoryId(null);
-    await loadAll();
+  async function del(id: string) {
+    if (!confirm("Delete this transaction?")) return;
+    const { error } = await supabase.from("transactions").delete().eq("id", id);
+    if (error) alert(error.message);
+    await load();
   }
 
   return (
     <div className="space-y-4">
-      {/* ACCOUNTS */}
-      <Card title="Accounts">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div className="md:col-span-4">
-            <div className="text-sm font-medium mb-2">Add account</div>
+      <Card title="Add transaction">
+        <form onSubmit={addTxn} className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div>
+            <Label>Date</Label>
+            <Input
+              type="date"
+              value={form.txn_date}
+              onChange={(e) => setForm({ ...form, txn_date: e.target.value })}
+              required
+            />
           </div>
 
-          <input
-            className="border rounded px-3 py-2"
-            placeholder="e.g., Chase Checking"
-            value={accName}
-            onChange={(e) => setAccName(e.target.value)}
-          />
+          <div className="md:col-span-2">
+            <Label>Description</Label>
+            <Input
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder="e.g., Groceries, Salary"
+              required
+            />
+          </div>
 
-          <select
-            className="border rounded px-3 py-2"
-            value={accType}
-            onChange={(e) => setAccType(e.target.value as AccountType)}
-          >
-            <option value="bank">bank</option>
-            <option value="cash">cash</option>
-            <option value="credit_card">credit_card</option>
-            <option value="loan">loan</option>
-            <option value="investment">investment</option>
-            <option value="other">other</option>
-          </select>
+          <div>
+            <Label>Amount</Label>
+            <Input
+              value={form.amount}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              placeholder="Type positive"
+              required
+            />
+          </div>
 
-          <input
-            className="border rounded px-3 py-2"
-            placeholder="USD"
-            value={accCurrency}
-            onChange={(e) => setAccCurrency(e.target.value)}
-          />
-
-          <input
-            className="border rounded px-3 py-2"
-            placeholder="Opening balance"
-            value={accOpening}
-            onChange={(e) => setAccOpening(e.target.value)}
-          />
-
-          <div className="md:col-span-4 flex justify-end">
-            <button
-              className="px-4 py-2 rounded bg-black text-white disabled:opacity-60"
-              disabled={loading || !orgId || !accName.trim()}
-              onClick={addAccount}
+          <div>
+            <Label>Account</Label>
+            <Select
+              value={form.account_id}
+              onChange={(e) => setForm({ ...form, account_id: (e.target as any).value })}
+              required
             >
-              Add
-            </button>
+              <option value="" disabled>
+                Select…
+              </option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </Select>
           </div>
 
-          {/* EDIT ACCOUNT PANEL */}
-          {editingAccount ? (
-            <div className="md:col-span-4 border rounded-lg p-4">
-              <div className="font-semibold mb-3">Edit account</div>
+          <div>
+            <Label>Category</Label>
+            <Select
+              value={form.category_id}
+              onChange={(e) => setForm({ ...form, category_id: (e.target as any).value })}
+            >
+              <option value="">Uncategorized</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.type}: {c.name}
+                </option>
+              ))}
+            </Select>
+          </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <input
-                  className="border rounded px-3 py-2"
-                  value={editAccName}
-                  onChange={(e) => setEditAccName(e.target.value)}
-                  placeholder="Name"
-                />
-
-                <select
-                  className="border rounded px-3 py-2"
-                  value={editAccType}
-                  onChange={(e) => setEditAccType(e.target.value as AccountType)}
-                >
-                  <option value="bank">bank</option>
-                  <option value="cash">cash</option>
-                  <option value="credit_card">credit_card</option>
-                  <option value="loan">loan</option>
-                  <option value="investment">investment</option>
-                  <option value="other">other</option>
-                </select>
-
-                <input
-                  className="border rounded px-3 py-2"
-                  value={editAccCurrency}
-                  onChange={(e) => setEditAccCurrency(e.target.value)}
-                  placeholder="Currency"
-                />
-
-                <input
-                  className="border rounded px-3 py-2"
-                  value={editAccOpening}
-                  onChange={(e) => setEditAccOpening(e.target.value)}
-                  placeholder="Opening balance"
-                />
-
-                <div className="md:col-span-4 flex justify-end gap-2">
-                  <button
-                    className="px-4 py-2 rounded border"
-                    onClick={() => setEditingAccountId(null)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="px-4 py-2 rounded bg-black text-white"
-                    onClick={saveAccountEdit}
-                    disabled={!editAccName.trim()}
-                  >
-                    Save
-                  </button>
-                </div>
-              </div>
-              <div className="text-xs text-zinc-500 mt-2">
-                Note: opening balance is separate from transactions and affects net worth.
-              </div>
+          <div className="md:col-span-5 flex items-center justify-between">
+            <div className="text-xs text-zinc-500">
+              Category controls sign automatically: Income = positive, Expense = negative.
             </div>
-          ) : null}
-
-          {/* LIST */}
-          <div className="md:col-span-4 mt-2">
-            {accounts.length === 0 ? (
-              <div className="text-sm text-zinc-600">No accounts yet.</div>
-            ) : (
-              <div className="space-y-2">
-                {accounts.map((a) => (
-                  <div
-                    key={a.id}
-                    className="flex items-center justify-between text-sm border-b border-zinc-100 py-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate">{a.name}</div>
-                      <div className="text-xs text-zinc-500">
-                        {a.type} • {a.currency} • opening {Number(a.opening_balance ?? 0).toFixed(2)}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <button
-                        className="text-blue-600 hover:underline"
-                        onClick={() => startEditAccount(a)}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="text-red-600 hover:underline"
-                        onClick={() => deleteAccount(a.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <Button type="submit" disabled={loading}>
+              Add
+            </Button>
           </div>
-        </div>
+        </form>
       </Card>
 
-      {/* CATEGORIES */}
-      <Card title="Categories">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="md:col-span-3">
-            <div className="text-sm font-medium mb-2">Add category</div>
-          </div>
-
-          <input
-            className="border rounded px-3 py-2"
-            placeholder="e.g., Groceries"
-            value={catName}
-            onChange={(e) => setCatName(e.target.value)}
-          />
-
-          <select
-            className="border rounded px-3 py-2"
-            value={catType}
-            onChange={(e) => setCatType(e.target.value as CategoryType)}
-          >
-            <option value="expense">expense</option>
-            <option value="income">income</option>
-          </select>
-
-          <div className="flex justify-end">
-            <button
-              className="px-4 py-2 rounded bg-black text-white disabled:opacity-60"
-              disabled={loading || !orgId || !catName.trim()}
-              onClick={addCategory}
-            >
-              Add
-            </button>
-          </div>
-
-          {/* EDIT CATEGORY PANEL */}
-          {editingCategory ? (
-            <div className="md:col-span-3 border rounded-lg p-4">
-              <div className="font-semibold mb-3">Edit category</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <input
-                  className="border rounded px-3 py-2"
-                  value={editCatName}
-                  onChange={(e) => setEditCatName(e.target.value)}
-                  placeholder="Name"
-                />
-                <select
-                  className="border rounded px-3 py-2"
-                  value={editCatType}
-                  onChange={(e) => setEditCatType(e.target.value as CategoryType)}
-                >
-                  <option value="expense">expense</option>
-                  <option value="income">income</option>
-                </select>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    className="px-4 py-2 rounded border"
-                    onClick={() => setEditingCategoryId(null)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="px-4 py-2 rounded bg-black text-white"
-                    onClick={saveCategoryEdit}
-                    disabled={!editCatName.trim()}
-                  >
-                    Save
-                  </button>
-                </div>
-              </div>
-
-              <div className="text-xs text-zinc-500 mt-2">
-                Category type controls transaction sign automatically (income = +, expense = -).
-              </div>
+      {/* ✅ EDIT BOX */}
+      {editing ? (
+        <Card title="Edit transaction">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <div>
+              <Label>Date</Label>
+              <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} />
             </div>
-          ) : null}
 
-          {/* LIST */}
-          <div className="md:col-span-3 mt-2">
-            {categories.length === 0 ? (
-              <div className="text-sm text-zinc-600">No categories yet.</div>
-            ) : (
-              <div className="space-y-2">
-                {categories.map((c) => (
-                  <div
-                    key={c.id}
-                    className="flex items-center justify-between text-sm border-b border-zinc-100 py-2"
-                  >
-                    <div className="truncate">
-                      {c.type}: {c.name}
-                    </div>
+            <div className="md:col-span-2">
+              <Label>Description</Label>
+              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+            </div>
 
-                    <div className="flex items-center gap-3">
-                      <button
-                        className="text-blue-600 hover:underline"
-                        onClick={() => startEditCategory(c)}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="text-red-600 hover:underline"
-                        onClick={() => deleteCategory(c.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
+            <div>
+              <Label>Amount</Label>
+              <Input value={editAmount} onChange={(e) => setEditAmount(e.target.value)} />
+            </div>
+
+            <div>
+              <Label>Account</Label>
+              <Select value={editAccountId} onChange={(e) => setEditAccountId((e.target as any).value)}>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
                 ))}
-              </div>
-            )}
+              </Select>
+            </div>
+
+            <div className="md:col-span-2">
+              <Label>Category</Label>
+              <Select value={editCategoryId} onChange={(e) => setEditCategoryId((e.target as any).value)}>
+                <option value="">Uncategorized</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.type}: {c.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div className="md:col-span-5 flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setEditing(null)}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+              <Button type="button" onClick={saveEdit} disabled={saving}>
+                {saving ? "Saving..." : "Save"}
+              </Button>
+            </div>
           </div>
+        </Card>
+      ) : null}
+
+      <Card title="Recent transactions (last 200)">
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-zinc-600">
+              <tr className="border-b border-zinc-200">
+                <th className="text-left py-2 pr-2">Date</th>
+                <th className="text-left py-2 pr-2">Description</th>
+                <th className="text-right py-2 pr-2">Amount</th>
+                <th className="text-left py-2 pr-2">Account</th>
+                <th className="text-left py-2 pr-2">Category</th>
+                <th className="py-2"></th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {txns.map((t) => (
+                <tr key={t.id} className="border-b border-zinc-100">
+                  <td className="py-2 pr-2 whitespace-nowrap">{t.txn_date}</td>
+                  <td className="py-2 pr-2">{t.description}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums">{t.amount.toFixed(2)}</td>
+                  <td className="py-2 pr-2">
+                    {accounts.find((a) => a.id === t.account_id)?.name ?? "—"}
+                  </td>
+                  <td className="py-2 pr-2">
+                    {categories.find((c) => c.id === t.category_id)?.name ?? "—"}
+                  </td>
+
+                  <td className="py-2 text-right space-x-3">
+                    <button className="text-blue-600 hover:underline" onClick={() => startEdit(t)}>
+                      Edit
+                    </button>
+                    <button className="text-red-600 hover:underline" onClick={() => del(t.id)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+
+              {!txns.length ? (
+                <tr>
+                  <td colSpan={6} className="py-4 text-zinc-600">
+                    No transactions yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         </div>
       </Card>
     </div>
