@@ -1,345 +1,494 @@
 "use client";
-import { useEffect, useState, type FormEvent } from "react";
+
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useActiveOrgId } from "@/lib/useActiveOrg";
 import { Button, Card, Input, Label, Select } from "@/components/ui";
 
-type Account = { id: string; name: string };
-type Category = { id: string; name: string; type: "income" | "expense" };
-type Txn = {
+type Org = { id: string; name: string };
+
+type Account = {
   id: string;
-  txn_date: string; // YYYY-MM-DD
-  description: string;
-  amount: number;
-  account_id: string;
-  category_id: string | null;
+  name: string;
+  type: "bank" | "cash" | "credit_card" | "loan" | "investment" | "other";
+  currency: string;
+  opening_balance: number;
 };
 
-function normalizeAmount(input: string, catType?: "income" | "expense") {
-  const n = Number(input || 0);
-  const abs = Math.abs(n);
-  if (!catType) return n; // Uncategorized -> keep what user typed
-  return catType === "expense" ? -abs : abs;
-}
+type Category = {
+  id: string;
+  name: string;
+  type: "income" | "expense";
+};
 
-export default function TransactionsPage() {
+export default function SettingsPage() {
   const orgId = useActiveOrgId();
 
+  // Workspace creation
+  const [orgName, setOrgName] = useState("");
+
+  // Invite (optional)
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"viewer" | "editor" | "admin">("viewer");
+
+  // Data
+  const [orgs, setOrgs] = useState<Org[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [txns, setTxns] = useState<Txn[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Add form
-  const [form, setForm] = useState({
-    txn_date: new Date().toISOString().slice(0, 10),
-    description: "",
-    amount: "",
-    account_id: "",
-    category_id: "",
-  });
+  // Add Account form
+  const [accName, setAccName] = useState("");
+  const [accType, setAccType] = useState<Account["type"]>("bank");
+  const [accCurrency, setAccCurrency] = useState("USD");
+  const [accOpening, setAccOpening] = useState("0");
 
-  // Edit state
-  const [editing, setEditing] = useState<Txn | null>(null);
-  const [editDate, setEditDate] = useState("");
-  const [editDesc, setEditDesc] = useState("");
-  const [editAmount, setEditAmount] = useState("");
-  const [editAccountId, setEditAccountId] = useState("");
-  const [editCategoryId, setEditCategoryId] = useState<string>(""); // "" = Uncategorized
-  const [saving, setSaving] = useState(false);
+  // Add Category form
+  const [catName, setCatName] = useState("");
+  const [catType, setCatType] = useState<Category["type"]>("expense");
 
+  // ✅ Edit Account state
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [editAccName, setEditAccName] = useState("");
+  const [editAccType, setEditAccType] = useState<Account["type"]>("bank");
+  const [editAccCurrency, setEditAccCurrency] = useState("USD");
+  const [editAccOpening, setEditAccOpening] = useState("0");
+
+  // ✅ Edit Category state
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [editCatName, setEditCatName] = useState("");
+  const [editCatType, setEditCatType] = useState<Category["type"]>("expense");
+
+  // ---------- Load ----------
   async function load() {
-    if (!orgId) return;
     setLoading(true);
 
-    const [a, c, t] = await Promise.all([
-      supabase.from("accounts").select("id,name").eq("org_id", orgId).order("name"),
-      supabase
-        .from("categories")
-        .select("id,name,type")
-        .eq("org_id", orgId)
-        .order("type")
-        .order("name"),
-      supabase
-        .from("transactions")
-        .select("id,txn_date,description,amount,account_id,category_id")
-        .eq("org_id", orgId)
-        .order("txn_date", { ascending: false })
-        .limit(200),
-    ]);
+    // Orgs user can see (RLS should allow members)
+    const o = await supabase.from("orgs").select("id,name").order("created_at", { ascending: false });
+    if (!o.error) setOrgs((o.data ?? []) as any);
+    else console.error(o.error);
 
-    if (!a.error) setAccounts(a.data as any);
-    else console.error(a.error);
+    if (orgId) {
+      const [a, c] = await Promise.all([
+        supabase
+          .from("accounts")
+          .select("id,name,type,currency,opening_balance")
+          .eq("org_id", orgId)
+          .order("name"),
 
-    if (!c.error) setCategories(c.data as any);
-    else console.error(c.error);
+        supabase
+          .from("categories")
+          .select("id,name,type")
+          .eq("org_id", orgId)
+          .order("type")
+          .order("name"),
+      ]);
 
-    if (!t.error) setTxns(t.data as any);
-    else console.error(t.error);
+      if (!a.error) setAccounts((a.data ?? []) as any);
+      else console.error(a.error);
+
+      if (!c.error) setCategories((c.data ?? []) as any);
+      else console.error(c.error);
+    } else {
+      setAccounts([]);
+      setCategories([]);
+    }
 
     setLoading(false);
   }
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId]);
 
-  function startEdit(t: Txn) {
-    setEditing(t);
-    setEditDate(t.txn_date);
-    setEditDesc(t.description);
-    setEditAmount(String(Math.abs(t.amount))); // user types positive
-    setEditAccountId(t.account_id);
-    setEditCategoryId(t.category_id ?? "");
+  // ---------- Workspace ----------
+  async function createWorkspace() {
+    if (!orgName.trim()) return alert("Enter a workspace name");
+    const { data, error } = await supabase.rpc("create_org", { p_name: orgName.trim() });
+
+    if (error) return alert(error.message);
+    setOrgName("");
+    await load();
+
+    // If your useActiveOrgId hook reads from local storage / a setting,
+    // you may want to set it there (depends on your implementation).
+    // Example (only if your hook uses localStorage key):
+    // localStorage.setItem("active_org_id", data);
+    // location.reload();
   }
 
-async function addTxn(e: FormEvent) {
-    e.preventDefault();
-    if (!orgId) return;
+  async function createInvite() {
+    if (!orgId) return alert("Create/select a workspace first");
+    if (!inviteEmail.trim()) return alert("Enter an email");
+    const { error } = await supabase.rpc("invite_member", {
+      p_org_id: orgId,
+      p_email: inviteEmail.trim(),
+      p_role: inviteRole,
+    });
+    if (error) return alert(error.message);
+    setInviteEmail("");
+    alert("Invite created.");
+  }
 
-    const cat = categories.find((c) => c.id === form.category_id);
-    const finalAmount = normalizeAmount(form.amount, cat?.type);
+  // ---------- Accounts ----------
+  async function addAccount() {
+    if (!orgId) return alert("Create/select a workspace first");
+    if (!accName.trim()) return alert("Enter account name");
 
-    const { error } = await supabase.from("transactions").insert({
+    const { error } = await supabase.from("accounts").insert({
       org_id: orgId,
-      txn_date: form.txn_date,
-      description: form.description,
-      amount: finalAmount,
-      account_id: form.account_id,
-      category_id: form.category_id || null,
+      name: accName.trim(),
+      type: accType,
+      currency: accCurrency || "USD",
+      opening_balance: Number(accOpening || 0),
     });
 
     if (error) return alert(error.message);
 
-    setForm({ ...form, description: "", amount: "" });
+    setAccName("");
+    setAccOpening("0");
     await load();
   }
 
-  async function saveEdit() {
-    if (!editing) return;
-
-    try {
-      setSaving(true);
-
-      const cat = categories.find((c) => c.id === editCategoryId);
-      const finalAmount = normalizeAmount(editAmount, cat?.type);
-
-      const { error } = await supabase
-        .from("transactions")
-        .update({
-          txn_date: editDate,
-          description: editDesc,
-          amount: finalAmount,
-          account_id: editAccountId,
-          category_id: editCategoryId || null,
-        })
-        .eq("id", editing.id);
-
-      if (error) throw error;
-
-      setEditing(null);
-      await load();
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message ?? "Failed to update transaction");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function del(id: string) {
-    if (!confirm("Delete this transaction?")) return;
-    const { error } = await supabase.from("transactions").delete().eq("id", id);
-    if (error) alert(error.message);
+  async function deleteAccount(id: string) {
+    if (!confirm("Delete this account?")) return;
+    const { error } = await supabase.from("accounts").delete().eq("id", id);
+    if (error) return alert(error.message);
     await load();
   }
 
+  function startEditAccount(a: Account) {
+    setEditingAccount(a);
+    setEditAccName(a.name);
+    setEditAccType(a.type);
+    setEditAccCurrency(a.currency || "USD");
+    setEditAccOpening(String(a.opening_balance ?? 0));
+  }
+
+  async function saveAccountEdit() {
+    if (!editingAccount) return;
+
+    const { error } = await supabase
+      .from("accounts")
+      .update({
+        name: editAccName.trim(),
+        type: editAccType,
+        currency: editAccCurrency || "USD",
+        opening_balance: Number(editAccOpening || 0),
+      })
+      .eq("id", editingAccount.id);
+
+    if (error) return alert(error.message);
+
+    setEditingAccount(null);
+    await load();
+  }
+
+  // ---------- Categories ----------
+  async function addCategory() {
+    if (!orgId) return alert("Create/select a workspace first");
+    if (!catName.trim()) return alert("Enter category name");
+
+    const { error } = await supabase.from("categories").insert({
+      org_id: orgId,
+      name: catName.trim(),
+      type: catType,
+    });
+
+    if (error) return alert(error.message);
+
+    setCatName("");
+    await load();
+  }
+
+  async function deleteCategory(id: string) {
+    if (!confirm("Delete this category?")) return;
+    const { error } = await supabase.from("categories").delete().eq("id", id);
+    if (error) return alert(error.message);
+    await load();
+  }
+
+  function startEditCategory(c: Category) {
+    setEditingCategory(c);
+    setEditCatName(c.name);
+    setEditCatType(c.type);
+  }
+
+  async function saveCategoryEdit() {
+    if (!editingCategory) return;
+
+    const { error } = await supabase
+      .from("categories")
+      .update({
+        name: editCatName.trim(),
+        type: editCatType,
+      })
+      .eq("id", editingCategory.id);
+
+    if (error) return alert(error.message);
+
+    setEditingCategory(null);
+    await load();
+  }
+
+  // ---------- UI ----------
   return (
     <div className="space-y-4">
-      <Card title="Add transaction">
-        <form onSubmit={addTxn} className="grid grid-cols-1 md:grid-cols-5 gap-3">
-          <div>
-            <Label>Date</Label>
+      <Card title="Workspace (Organization)">
+        <div className="text-sm text-zinc-600 mb-3">
+          {orgId ? (
+            <span>Active workspace selected.</span>
+          ) : (
+            <span>No workspace selected yet. Create one below.</span>
+          )}
+        </div>
+
+        <div className="flex gap-2 items-end">
+          <div className="flex-1">
+            <Label>Create a new workspace</Label>
             <Input
-              type="date"
-              value={form.txn_date}
-              onChange={(e) => setForm({ ...form, txn_date: e.target.value })}
-              required
+              value={orgName}
+              onChange={(e) => setOrgName(e.target.value)}
+              placeholder="e.g., Maan Personal"
             />
           </div>
+          <Button type="button" onClick={createWorkspace} disabled={loading}>
+            Create
+          </Button>
+        </div>
 
-          <div className="md:col-span-2">
-            <Label>Description</Label>
-            <Input
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder="e.g., Groceries, Salary"
-              required
-            />
-          </div>
-
-          <div>
-            <Label>Amount</Label>
-            <Input
-              value={form.amount}
-              onChange={(e) => setForm({ ...form, amount: e.target.value })}
-              placeholder="Type positive"
-              required
-            />
-          </div>
-
-          <div>
-            <Label>Account</Label>
-            <Select
-              value={form.account_id}
-              onChange={(e) => setForm({ ...form, account_id: (e.target as any).value })}
-              required
-            >
-              <option value="" disabled>
-                Select…
-              </option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          <div>
-            <Label>Category</Label>
-            <Select
-              value={form.category_id}
-              onChange={(e) => setForm({ ...form, category_id: (e.target as any).value })}
-            >
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.type}: {c.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          <div className="md:col-span-5 flex items-center justify-between">
-            <div className="text-xs text-zinc-500">
-              Category controls sign automatically: Income = positive, Expense = negative.
-            </div>
-            <Button type="submit" disabled={loading}>
-              Add
-            </Button>
-          </div>
-        </form>
+        <div className="text-xs text-zinc-500 mt-2">
+          If you don’t see your new workspace selected automatically, we can wire it to auto-select based on how your
+          <code className="mx-1">useActiveOrgId</code> hook works.
+        </div>
       </Card>
 
-      {/* ✅ EDIT BOX */}
-      {editing ? (
-        <Card title="Edit transaction">
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+      <Card title="Users">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div className="md:col-span-2">
+            <Label>Invite by email</Label>
+            <Input
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              placeholder="user@email.com"
+            />
+          </div>
+
+          <div>
+            <Label>Role</Label>
+            <Select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as any)}>
+              <option value="viewer">viewer</option>
+              <option value="editor">editor</option>
+              <option value="admin">admin</option>
+            </Select>
+          </div>
+        </div>
+
+        <div className="flex justify-end mt-3">
+          <Button type="button" onClick={createInvite} disabled={loading}>
+            Create invite
+          </Button>
+        </div>
+
+        <div className="text-xs text-zinc-500 mt-2">
+          Invites require your RLS + <code className="mx-1">invite_member</code> function to be enabled.
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Accounts */}
+        <Card title="Accounts">
+          <div className="space-y-3">
             <div>
-              <Label>Date</Label>
-              <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} />
+              <Label>Name</Label>
+              <Input value={accName} onChange={(e) => setAccName(e.target.value)} placeholder="e.g., Chase Checking" />
             </div>
 
-            <div className="md:col-span-2">
-              <Label>Description</Label>
-              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Type</Label>
+                <Select value={accType} onChange={(e) => setAccType(e.target.value as any)}>
+                  <option value="bank">bank</option>
+                  <option value="cash">cash</option>
+                  <option value="credit_card">credit_card</option>
+                  <option value="loan">loan</option>
+                  <option value="investment">investment</option>
+                  <option value="other">other</option>
+                </Select>
+              </div>
+
+              <div>
+                <Label>Currency</Label>
+                <Input value={accCurrency} onChange={(e) => setAccCurrency(e.target.value)} placeholder="USD" />
+              </div>
             </div>
 
             <div>
-              <Label>Amount</Label>
-              <Input value={editAmount} onChange={(e) => setEditAmount(e.target.value)} />
+              <Label>Opening balance</Label>
+              <Input value={accOpening} onChange={(e) => setAccOpening(e.target.value)} />
             </div>
 
-            <div>
-              <Label>Account</Label>
-              <Select value={editAccountId} onChange={(e) => setEditAccountId((e.target as any).value)}>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
-
-            <div className="md:col-span-2">
-              <Label>Category</Label>
-              <Select value={editCategoryId} onChange={(e) => setEditCategoryId((e.target as any).value)}>
-                <option value="">Uncategorized</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.type}: {c.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
-
-            <div className="md:col-span-5 flex justify-end gap-2">
-              <Button
-  type="button"
-  onClick={() => setEditing(null)}
-  disabled={saving}
->
-  Cancel
-</Button>
-
-              <Button type="button" onClick={saveEdit} disabled={saving}>
-                {saving ? "Saving..." : "Save"}
+            <div className="flex justify-end">
+              <Button type="button" onClick={addAccount} disabled={loading}>
+                Add
               </Button>
+            </div>
+
+            {/* ✅ Edit Account block */}
+            {editingAccount && (
+              <div className="border rounded-lg p-4 space-y-3">
+                <div className="font-semibold">Edit account</div>
+
+                <div>
+                  <Label>Name</Label>
+                  <Input value={editAccName} onChange={(e) => setEditAccName(e.target.value)} />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Type</Label>
+                    <Select value={editAccType} onChange={(e) => setEditAccType(e.target.value as any)}>
+                      <option value="bank">bank</option>
+                      <option value="cash">cash</option>
+                      <option value="credit_card">credit_card</option>
+                      <option value="loan">loan</option>
+                      <option value="investment">investment</option>
+                      <option value="other">other</option>
+                    </Select>
+                  </div>
+
+                  <div>
+                    <Label>Currency</Label>
+                    <Input value={editAccCurrency} onChange={(e) => setEditAccCurrency(e.target.value)} />
+                  </div>
+                </div>
+
+                <div>
+                  <Label>Opening balance</Label>
+                  <Input value={editAccOpening} onChange={(e) => setEditAccOpening(e.target.value)} />
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button className="px-4 py-2 rounded border" onClick={() => setEditingAccount(null)}>
+                    Cancel
+                  </button>
+                  <button className="px-4 py-2 rounded bg-black text-white" onClick={saveAccountEdit}>
+                    Save
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-2 space-y-2">
+              {!accounts.length ? (
+                <div className="text-sm text-zinc-600">No accounts yet.</div>
+              ) : (
+                accounts.map((a) => (
+                  <div key={a.id} className="flex items-center justify-between text-sm">
+                    <div className="truncate">{a.name}</div>
+
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-zinc-500">{a.type}</span>
+
+                      <button className="text-blue-600 hover:underline" onClick={() => startEditAccount(a)}>
+                        Edit
+                      </button>
+
+                      <button className="text-red-600 hover:underline" onClick={() => deleteAccount(a.id)}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </Card>
-      ) : null}
 
-      <Card title="Recent transactions (last 200)">
-        <div className="overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="text-xs text-zinc-600">
-              <tr className="border-b border-zinc-200">
-                <th className="text-left py-2 pr-2">Date</th>
-                <th className="text-left py-2 pr-2">Description</th>
-                <th className="text-right py-2 pr-2">Amount</th>
-                <th className="text-left py-2 pr-2">Account</th>
-                <th className="text-left py-2 pr-2">Category</th>
-                <th className="py-2"></th>
-              </tr>
-            </thead>
+        {/* Categories */}
+        <Card title="Categories">
+          <div className="space-y-3">
+            <div>
+              <Label>Name</Label>
+              <Input value={catName} onChange={(e) => setCatName(e.target.value)} placeholder="e.g., Groceries" />
+            </div>
 
-            <tbody>
-              {txns.map((t) => (
-                <tr key={t.id} className="border-b border-zinc-100">
-                  <td className="py-2 pr-2 whitespace-nowrap">{t.txn_date}</td>
-                  <td className="py-2 pr-2">{t.description}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums">{t.amount.toFixed(2)}</td>
-                  <td className="py-2 pr-2">
-                    {accounts.find((a) => a.id === t.account_id)?.name ?? "—"}
-                  </td>
-                  <td className="py-2 pr-2">
-                    {categories.find((c) => c.id === t.category_id)?.name ?? "—"}
-                  </td>
+            <div>
+              <Label>Type</Label>
+              <Select value={catType} onChange={(e) => setCatType(e.target.value as any)}>
+                <option value="expense">expense</option>
+                <option value="income">income</option>
+              </Select>
+            </div>
 
-                  <td className="py-2 text-right space-x-3">
-                    <button className="text-blue-600 hover:underline" onClick={() => startEdit(t)}>
-                      Edit
-                    </button>
-                    <button className="text-red-600 hover:underline" onClick={() => del(t.id)}>
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
+            <div className="flex justify-end">
+              <Button type="button" onClick={addCategory} disabled={loading}>
+                Add
+              </Button>
+            </div>
 
-              {!txns.length ? (
-                <tr>
-                  <td colSpan={6} className="py-4 text-zinc-600">
-                    No transactions yet.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+            {/* ✅ Edit Category block */}
+            {editingCategory && (
+              <div className="border rounded-lg p-4 space-y-3">
+                <div className="font-semibold">Edit category</div>
+
+                <div>
+                  <Label>Name</Label>
+                  <Input value={editCatName} onChange={(e) => setEditCatName(e.target.value)} />
+                </div>
+
+                <div>
+                  <Label>Type</Label>
+                  <Select value={editCatType} onChange={(e) => setEditCatType(e.target.value as any)}>
+                    <option value="expense">expense</option>
+                    <option value="income">income</option>
+                  </Select>
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button className="px-4 py-2 rounded border" onClick={() => setEditingCategory(null)}>
+                    Cancel
+                  </button>
+                  <button className="px-4 py-2 rounded bg-black text-white" onClick={saveCategoryEdit}>
+                    Save
+                  </button>
+                </div>
+
+                <div className="text-xs text-zinc-500">
+                  If you change a category from expense ↔ income, we can optionally auto-fix existing transaction signs
+                  too (tell me if you want that).
+                </div>
+              </div>
+            )}
+
+            <div className="pt-2 space-y-2">
+              {!categories.length ? (
+                <div className="text-sm text-zinc-600">No categories yet.</div>
+              ) : (
+                categories.map((c) => (
+                  <div key={c.id} className="flex items-center justify-between text-sm">
+                    <div className="truncate">
+                      <span className="text-xs text-zinc-500 mr-2">{c.type}:</span>
+                      {c.name}
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <button className="text-blue-600 hover:underline" onClick={() => startEditCategory(c)}>
+                        Edit
+                      </button>
+
+                      <button className="text-red-600 hover:underline" onClick={() => deleteCategory(c.id)}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }
