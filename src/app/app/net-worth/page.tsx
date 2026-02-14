@@ -34,7 +34,6 @@ function formatMoney(amount: number, currency?: string | null) {
       maximumFractionDigits: 2,
     }).format(amount);
   } catch {
-    // fallback if currency code is invalid/missing
     return `$${amount.toFixed(2)}`;
   }
 }
@@ -83,7 +82,7 @@ export default function NetWorthPage() {
     if (!orgId) return;
 
     (async () => {
-      // 1) Load accounts (for opening balance + currency + id)
+      // 1) Load accounts
       const { data: accData, error: accErr } = await supabase
         .from("accounts")
         .select("id,name,opening_balance,currency,type")
@@ -105,8 +104,7 @@ export default function NetWorthPage() {
 
       setAccounts(accRows);
 
-      // 2) Load recent transactions (enough to build running balance)
-      // If you have many transactions, you can increase/decrease this.
+      // 2) Load recent transactions + categories
       const { data: txnData, error: txnErr } = await supabase
         .from("transactions")
         .select("id,txn_date,description,amount,account_id,created_at,categories(name)")
@@ -121,9 +119,16 @@ export default function NetWorthPage() {
       }
 
       const grouped: Record<string, TxnRow[]> = {};
+
       for (const t of txnData ?? []) {
         const accountId = t.account_id;
         if (!grouped[accountId]) grouped[accountId] = [];
+
+        // ✅ FIX: categories may come back as array OR object depending on relationship
+        const cat = (t as any).categories;
+        const categoryName =
+          Array.isArray(cat) ? (cat[0]?.name ?? null) : (cat?.name ?? null);
+
         grouped[accountId].push({
           id: t.id,
           txn_date: t.txn_date,
@@ -131,7 +136,7 @@ export default function NetWorthPage() {
           amount: Number(t.amount || 0),
           account_id: t.account_id,
           created_at: t.created_at ?? null,
-          category_name: t.categories?.name ?? null,
+          category_name: categoryName,
         });
       }
 
@@ -185,7 +190,7 @@ export default function NetWorthPage() {
                 return { ...t, running_balance: running };
               });
 
-              // show newest first (limit rows)
+              // show newest first
               const rowsToShow = 25;
               const desc = [...withRunningAsc].sort((a: any, b: any) => {
                 if (a.txn_date !== b.txn_date) return b.txn_date.localeCompare(a.txn_date);
@@ -193,10 +198,10 @@ export default function NetWorthPage() {
               });
 
               const displayBalance =
-                // Prefer your RPC balance (matches your summary) if names match
                 balanceByName[acc.name] ??
-                // otherwise fall back to computed
-                (withRunningAsc.length ? (withRunningAsc[withRunningAsc.length - 1] as any).running_balance : acc.opening_balance);
+                (withRunningAsc.length
+                  ? (withRunningAsc[withRunningAsc.length - 1] as any).running_balance
+                  : acc.opening_balance);
 
               return (
                 <details key={acc.id} className="py-3">
@@ -238,26 +243,4 @@ export default function NetWorthPage() {
                               <td className="py-2 pr-3 text-right tabular-nums">
                                 {formatMoney(Number(t.amount || 0), acc.currency)}
                               </td>
-                              <td className="py-2 pr-0 text-right tabular-nums font-medium">
-                                {formatMoney(Number(t.running_balance || 0), acc.currency)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                    {desc.length > rowsToShow ? (
-                      <div className="mt-2 text-xs text-zinc-500">
-                        Showing latest {rowsToShow} transactions (out of {desc.length} loaded).
-                      </div>
-                    ) : null}
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-    </div>
-  );
-}
+                              <td c
