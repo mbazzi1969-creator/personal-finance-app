@@ -277,13 +277,13 @@ export default function TransactionsPage() {
 
             <div className="md:col-span-5 flex justify-end gap-2">
               <Button
-                type="button"
-                variant="secondary"
-                onClick={() => setEditing(null)}
-                disabled={saving}
-              >
-                Cancel
-              </Button>
+  type="button"
+  onClick={() => setEditing(null)}
+  disabled={saving}
+>
+  Cancel
+</Button>
+
               <Button type="button" onClick={saveEdit} disabled={saving}>
                 {saving ? "Saving..." : "Save"}
               </Button>
