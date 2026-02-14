@@ -243,4 +243,26 @@ export default function NetWorthPage() {
                               <td className="py-2 pr-3 text-right tabular-nums">
                                 {formatMoney(Number(t.amount || 0), acc.currency)}
                               </td>
-                              <td c
+                              <td className="py-2 pr-0 text-right tabular-nums font-medium">
+                                {formatMoney(Number(t.running_balance || 0), acc.currency)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {desc.length > rowsToShow ? (
+                      <div className="mt-2 text-xs text-zinc-500">
+                        Showing latest {rowsToShow} transactions (out of {desc.length} loaded).
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
