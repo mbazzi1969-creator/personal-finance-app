@@ -1,5 +1,4 @@
 "use client";
-
 import { useEffect, useState, type FormEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useActiveOrgId } from "@/lib/useActiveOrg";
@@ -94,7 +93,7 @@ export default function TransactionsPage() {
     setEditCategoryId(t.category_id ?? "");
   }
 
-  async function addTxn(e: FormEvent) {
+async function addTxn(e: FormEvent) {
     e.preventDefault();
     if (!orgId) return;
 
